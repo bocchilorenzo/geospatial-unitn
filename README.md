@@ -1,5 +1,5 @@
 # geospatial-unitn
-Repository for the project of the Geospatial Analysis in UniTN, A.Y. 2022/23.
+Repository for the project of the Geospatial Analysis course in UniTN, A.Y. 2022/23.
 
 The project aims to do a '15 minute city' analysis of the city of Bologna.
 
