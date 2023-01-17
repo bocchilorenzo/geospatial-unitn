@@ -1,0 +1,224 @@
+```{r setup, include=F}
+knitr::opts_chunk$set(fig.align="center", fig.width = 10)
+
+install.packages("spdep", quiet = T)
+install.packages("sf", quiet = T)
+install.packages("tmap", quiet = T)
+install.packages("leaflet", quiet = T)
+install.packages("tidyverse", quiet = T)
+install.packages("htmlwidgets", quiet = T)
+install.packages("htmltools", quiet = T)
+install.packages("spatialreg", quiet = T)
+install.packages("mapview", quiet = T)
+install.packages("boot", quiet = T)
+webshot::install_phantomjs()
+
+library(spdep); library(sf); library(tmap); library(leaflet); library(tidyverse); library(htmlwidgets); library(htmltools); library(spatialreg); library(mapview); library(boot)
+```
+
+We load the datasets:
+```{r}
+bologna <- st_read("../dataset/statistical_areas.geojson")
+representative.points <- read.csv("../dataset/representative_points.csv")
+representative.points <- representative.points %>%
+  sf::st_as_sf(coords = c(2,3))
+representative.points <- representative.points[,2]
+```
+We calculate the contiguity-based neighbors:
+```{r}
+contiguous.neighbors <- poly2nb(bologna, queen=T)
+representative.coordinates <- st_geometry(representative.points)
+#png(filename="../images/weights.png", res = 1, width = 1000, height=1000)
+plot(st_geometry(bologna), border="grey", col="#AB2525")
+plot(contiguous.neighbors, representative.coordinates, add=TRUE)
+#dev.off()
+```
+
+The weights are row standardized to ease the computation
+```{r}
+contiguous.weights <- nb2listw(contiguous.neighbors,style="W")
+```
+
+We do the Moran's I test using the score and the weights:
+```{r}
+moran.test(bologna$walk_score, contiguous.weights, randomisation=TRUE)
+```
+
+The results tells us that there is spatial correlation of the scores and the p value is significant. We proceed to calculate the Moran's test on the residuals of an OLS model:
+```{r}
+ols <- lm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes, bologna)
+summary(ols) 
+
+bologna$studentized_residuals <- rstudent(ols)
+qpal <- colorQuantile("plasma", bologna$studentized_residuals, n=10)
+map.bologna <- leaflet(bologna) %>%
+  addPolygons(stroke = FALSE, fillOpacity = .8, smoothFactor = 0.2, color = ~qpal(studentized_residuals), label = ~htmlEscape(walk_score)) %>%
+  addTiles() %>%
+  addLegend("topright", pal = colorNumeric(palette = "plasma", domain = bologna$studentized_residuals), values = ~studentized_residuals,
+    title = "Residual score",
+    opacity = 1
+  )
+
+#mapshot(map.bologna, file = "../images/residual_score.png")
+map.bologna
+#saveWidget(map.bologna, 'residual.html')
+
+lm.morantest(ols,contiguous.weights,resfun=rstudent)
+```
+
+Once again the result indicates spatial dependence. We can use the Moran scatterplot to view the spatial association between the areas. The quadrant "high-high" in the top right identifies the areas with a high score and spatially lagged score, while the bottom left identifies the opposite. These two regions in the plot are characterized by positive spatial autocorrelation, while the other two by negative spatial autocorrelation.
+```{r}
+contiguous.weights.2 <- nb2listw(contiguous.neighbors, style="W", zero.policy=F)
+#png(filename="../images/moran_scatter.png", res = 150, width = 1000, height=800)
+mplot <- moran.plot(bologna$walk_score, listw=contiguous.weights.2, main="Moran scatterplot", xlab = "Walk score", ylab = "Spatially lagged walk score")
+grid()
+#dev.off()
+```
+
+We can also plot the areas that are most influential to the calculation of the Moran's index:
+```{r}
+importantAreas <- c()
+for (i in c(1:length(mplot$is_inf))){
+  if (mplot$is_inf[i]){
+    importantAreas <- c(importantAreas, i)
+  }
+}
+
+#png(filename="../images/influential.png", res = 1, width = 1000, height=1000)
+plot(st_geometry(bologna), border="black", col="grey")
+plot(st_geometry(subset(bologna, codice_area_statistica %in% importantAreas)), border="black", col="#AB2525", add=T)
+#dev.off()
+```
+
+After having verified the presence of global spatial associations, we can check for local ones by using the local Moran's index.
+```{r}
+localMoran <- localmoran(bologna$walk_score, contiguous.weights.2)
+bologna$localMoran <- localMoran[,1]
+bologna$pvaluelocal <- localMoran[,5]
+#png(filename="../images/local_moran.png", res = 200, width = 1000, height=1000)
+tm_shape(bologna) + 
+  tm_polygons("localMoran", title = "Local Moran's I", palette="plasma", ) +
+  tm_layout(frame = F)
+#dev.off()
+```
+
+Many areas have an index different from 0; we can plot the p values to check how significant the local patterns are:
+```{r}
+bologna$pvalueMoran <- p.adjust(localMoran[, 5], "bonferroni")
+#png(filename="../images/p_values.png", res = 200, width = 1000, height=1000)
+tm_shape(bologna) + 
+  tm_polygons("pvalueMoran", title = "Local Moran's I significance map",
+                breaks=c(0, 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1), palette="plasma") +
+  tm_layout(frame = F)
+#dev.off()
+```
+
+The p-values are not great. We can try by doing bootstrap-based inference, to add some randomization:
+```{r}
+pvalue.permutation <- localmoran_perm(bologna$walk_score, contiguous.weights.2, nsim = 9999, iseed = 1) 
+bologna$pvaluepermutation <- p.adjust(pvalue.permutation[, "Pr(z != E(Ii)) Sim"], "bonferroni")
+#png(filename="../images/p_values_perm.png", res = 200, width = 1000, height=1000)
+tm_shape(bologna) + 
+  tm_polygons("pvaluepermutation", title = "Local Moran's I significance map",
+                breaks=c(0, 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1), palette="plasma") +
+  tm_layout(frame = F)
+#dev.off()
+```
+
+The result here is much better, with p values significant at 95% in the center of the map.
+
+Now we can estimate the spatial models. We start with the Spatial Durbin Model, for global association:
+```{r}
+SDM <- lagsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+                data = bologna,
+                listw=contiguous.weights,
+                type="mixed")
+summary(SDM)
+```
+Aside from the amenities within 5 minutes and their spatially lagged counterpart, all the variables are significant at 95%.
+
+We try the Spatial Lag Model:
+```{r}
+SAR <- lagsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+                data = bologna,
+                listw=contiguous.weights)
+summary(SAR)
+```
+Once again, the only non significant coefficient at 95% is the number of amenities within 5 minutes.
+
+Now, we switch to the models for local association. First, the Spatial Durbin Error Model:
+```{r}
+SDEM <- errorsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+                   data = bologna,
+                   listw=contiguous.weights,
+                   etype = "emixed")
+summary(SDEM)
+```
+The result is the same as the first two, which see the number of amenities within 15 minutes as the most significant together with its lag.
+
+The Spatial Error Model:
+```{r}
+SEM <- errorsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+                  data = bologna,
+                  listw=contiguous.weights)
+summary(SEM)
+```
+In this case, the only significant parameter is the number of amenities within 15 minutes.
+
+Finally, the Spatially Lagged X Model:
+```{r}
+OLSX <- lmSLX(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+             data = bologna,
+             listw=contiguous.weights)
+summary(OLSX)
+```
+Even here the result is the same as all the other models except for the SEM.
+
+We now need to interpret the spillovers of the models. Aside from the SEM, which does not include the spatially lagged coefficients, all can be tested for direct, indirect and total impact on the neighboring areas. First the SAR:
+```{r}
+impact.SAR <- impacts(SAR, listw=contiguous.weights)
+impact.SAR
+```
+
+The SDM:
+```{r}
+impact.SDM <- impacts(SDM, listw=contiguous.weights)
+impact.SDM
+```
+The SDEM:
+```{r}
+impact.SDEM <- impacts(SDEM, listw=contiguous.weights)
+impact.SDEM
+```
+And the OLSX:
+```{r}
+impact.OLSX <- impacts(OLSX, listw=contiguous.weights)
+impact.OLSX
+```
+In general, the results are very similar among the different models, with the SAR being the most different of the group. The number of amenities within 5 minutes and 15 minutes always have a positive impact on the walk score, while those within 10 minutes always have a negative impact.
+
+The SAR, while showing the same pattern for positive and negative impacts, has values that largely differ from the other models. In particular, the total impact of the amenities within 5 minutes is lower than 1, those within 10 minutes are closer to 0 in all cases and the direct impact of those within 15 minutes is half the one of the other models.
+
+The final test before choosing the appropriate model is the Lagrange Multiplier (LM) test of spatial dependence on OLS residuals. It is used to test the alternative hypothesis of the Moran's I test and is specified as a Spatial Error Model (LMerr) and as a Spatial Lag Model (LMlag). However the two test statistics are not independent on one another so that one can only test the alternative hypothesis that the errors follow a SEM model assuming that there no spatial lag component and vice versa. A robust version of both tests can be used for this.
+```{r}
+ols.2 <- lm(walk_score ~ within_5_minutes + within_10_minutes + within_15_minutes,
+            data = bologna)
+ols.test <- lm.LMtests(ols.2, contiguous.weights, 
+                    test=c("LMerr", "LMlag", "RLMerr", "RLMlag"))
+summary(ols.test)
+```
+In the case of the regular LM test, the hypothesis of spatial independence cannot be accepted, and therefore it confirms the finding of the Moran's test. On the other hand, the robust version finds spatial independence in both specifications. In both test versions, the spatial lag model is better than the spatial error model.
+
+Finally, the selection for the best model can be computed. The aim is to compare the ANOVA of the models and see whether the models can be simplified following the pipeline: SDM → SAR → SEM → SDEM.
+```{r}
+anova(SDM, SAR)
+```
+The SDM can be simplified in the SAR.
+```{r}
+anova(SDM, SEM)
+```
+It can also be simplified in the SEM.
+```{r}
+anova(SDEM, SEM)
+```
+The SEM cannot be simplified in the SDEM, therefore it remains the model to be used.
