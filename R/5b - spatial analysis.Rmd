@@ -1,17 +1,20 @@
 ```{r setup, include=F}
 knitr::opts_chunk$set(fig.align="center", fig.width = 10)
 
-install.packages("spdep", quiet = T)
-install.packages("sf", quiet = T)
-install.packages("tmap", quiet = T)
-install.packages("leaflet", quiet = T)
-install.packages("tidyverse", quiet = T)
-install.packages("htmlwidgets", quiet = T)
-install.packages("htmltools", quiet = T)
-install.packages("spatialreg", quiet = T)
-install.packages("mapview", quiet = T)
-install.packages("boot", quiet = T)
-webshot::install_phantomjs()
+# Needs RTools on Windows
+install.packages("devtools", quiet = T)
+devtools::install_version("spdep", "1.2-7")
+devtools::install_version("sf", "1.0-9")
+devtools::install_version("tmap", "3.3-3")
+devtools::install_version("leaflet", "2.1.1")
+devtools::install_version("tidyverse", "1.3.2")
+devtools::install_version("htmlwidgets", "1.5.4")
+devtools::install_version("htmltools", "0.5.3")
+devtools::install_version("spatialreg", "1.2-6")
+devtools::install_version("mapview", "2.11.0")
+devtools::install_version("boot", "1.3-28")
+devtools::install_version("webshot", "0.5.4")
+webshot::install_phantomjs(version = "2.1.1")
 
 library(spdep); library(sf); library(tmap); library(leaflet); library(tidyverse); library(htmlwidgets); library(htmltools); library(spatialreg); library(mapview); library(boot)
 ```
@@ -24,6 +27,7 @@ representative.points <- representative.points %>%
   sf::st_as_sf(coords = c(2,3))
 representative.points <- representative.points[,2]
 ```
+
 We calculate the contiguity-based neighbors:
 ```{r}
 contiguous.neighbors <- poly2nb(bologna, queen=T)
@@ -135,6 +139,7 @@ SDM <- lagsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_mi
                 type="mixed")
 summary(SDM)
 ```
+
 Aside from the amenities within 5 minutes and their spatially lagged counterpart, all the variables are significant at 95%.
 
 We try the Spatial Lag Model:
@@ -144,6 +149,7 @@ SAR <- lagsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_mi
                 listw=contiguous.weights)
 summary(SAR)
 ```
+
 Once again, the only non significant coefficient at 95% is the number of amenities within 5 minutes.
 
 Now, we switch to the models for local association. First, the Spatial Durbin Error Model:
@@ -154,6 +160,7 @@ SDEM <- errorsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15
                    etype = "emixed")
 summary(SDEM)
 ```
+
 The result is the same as the first two, which see the number of amenities within 15 minutes as the most significant together with its lag.
 
 The Spatial Error Model:
@@ -163,6 +170,7 @@ SEM <- errorsarlm(walk_score ~ within_5_minutes + within_10_minutes + within_15_
                   listw=contiguous.weights)
 summary(SEM)
 ```
+
 In this case, the only significant parameter is the number of amenities within 15 minutes.
 
 Finally, the Spatially Lagged X Model:
@@ -172,6 +180,7 @@ OLSX <- lmSLX(walk_score ~ within_5_minutes + within_10_minutes + within_15_minu
              listw=contiguous.weights)
 summary(OLSX)
 ```
+
 Even here the result is the same as all the other models except for the SEM.
 
 We now need to interpret the spillovers of the models. Aside from the SEM, which does not include the spatially lagged coefficients, all can be tested for direct, indirect and total impact on the neighboring areas. First the SAR:
@@ -185,16 +194,19 @@ The SDM:
 impact.SDM <- impacts(SDM, listw=contiguous.weights)
 impact.SDM
 ```
+
 The SDEM:
 ```{r}
 impact.SDEM <- impacts(SDEM, listw=contiguous.weights)
 impact.SDEM
 ```
+
 And the OLSX:
 ```{r}
 impact.OLSX <- impacts(OLSX, listw=contiguous.weights)
 impact.OLSX
 ```
+
 In general, the results are very similar among the different models, with the SAR being the most different of the group. The number of amenities within 5 minutes and 15 minutes always have a positive impact on the walk score, while those within 10 minutes always have a negative impact.
 
 The SAR, while showing the same pattern for positive and negative impacts, has values that largely differ from the other models. In particular, the total impact of the amenities within 5 minutes is lower than 1, those within 10 minutes are closer to 0 in all cases and the direct impact of those within 15 minutes is half the one of the other models.
@@ -207,18 +219,22 @@ ols.test <- lm.LMtests(ols.2, contiguous.weights,
                     test=c("LMerr", "LMlag", "RLMerr", "RLMlag"))
 summary(ols.test)
 ```
+
 In the case of the regular LM test, the hypothesis of spatial independence cannot be accepted, and therefore it confirms the finding of the Moran's test. On the other hand, the robust version finds spatial independence in both specifications. In both test versions, the spatial lag model is better than the spatial error model.
 
 Finally, the selection for the best model can be computed. The aim is to compare the ANOVA of the models and see whether the models can be simplified following the pipeline: SDM → SAR → SEM → SDEM.
 ```{r}
 anova(SDM, SAR)
 ```
+
 The SDM can be simplified in the SAR.
 ```{r}
 anova(SDM, SEM)
 ```
+
 It can also be simplified in the SEM.
 ```{r}
 anova(SDEM, SEM)
 ```
+
 The SEM cannot be simplified in the SDEM, therefore it remains the model to be used.

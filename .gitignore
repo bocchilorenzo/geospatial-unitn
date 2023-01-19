@@ -1,3 +1,6 @@
 images/
 dataset/
 .env
+.Rproj.user
+.Rhistory
+*.Rproj
